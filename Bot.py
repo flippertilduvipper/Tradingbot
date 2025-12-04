@@ -22,8 +22,8 @@ BASE_URL = os.getenv("BASE_URL", "https://api.binance.com")
 # Sæt til False når du vil handle rigtigt
 DRY_RUN = True
 
-# Symboler vi handler
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT"]
+# Symboler vi handler (USDC-par)
+SYMBOLS = ["BTCUSDC", "ETHUSDC", "XRPUSDC"]
 
 INTERVAL = "5m"
 KLINE_LIMIT = 200
@@ -40,7 +40,7 @@ RSI_PERIOD = 14
 BB_PERIOD = 20
 BB_STD = 2.0
 
-XRP_SYMBOL = "XRPUSDT"
+XRP_SYMBOL = "XRPUSDC"
 XRP_SWING_RSI_LOW = 35
 XRP_SWING_RSI_HIGH = 65
 
@@ -117,7 +117,6 @@ def ema(values, period):
         return None
     ema_values = []
     k = 2 / (period + 1)
-    # Start med simpel gennemsnit
     sma = sum(values[:period]) / period
     ema_values.append(sma)
     for price in values[period:]:
@@ -144,8 +143,6 @@ def rsi(values, period=14):
 
     rs = avg_gain / avg_loss
     rsi_val = 100 - (100 / (1 + rs))
-
-    # Vi kører ikke hele Wilder-serien – vi nøjes med sidste værdi
     return rsi_val
 
 
@@ -191,7 +188,7 @@ def get_symbol_info(symbol: str):
 # ORDRE-HÅNDTERING
 # ============================
 
-def calc_order_quantity(symbol: str, price: float, usdt_to_use: float) -> float:
+def calc_order_quantity(symbol: str, price: float, usdc_to_use: float) -> float:
     info = get_symbol_info(symbol)
     step_size = None
     for f in info["filters"]:
@@ -199,9 +196,9 @@ def calc_order_quantity(symbol: str, price: float, usdt_to_use: float) -> float:
             step_size = float(f["stepSize"])
             break
     if step_size is None:
-        return usdt_to_use / price
+        return usdc_to_use / price
 
-    raw_qty = usdt_to_use / price
+    raw_qty = usdc_to_use / price
     if step_size <= 0:
         return raw_qty
     precision = max(0, int(round(-math.log10(step_size))))
@@ -245,9 +242,6 @@ def evaluate_trend(closes):
     ema_fast_vals = ema(closes, EMA_FAST)
     ema_slow_vals = ema(closes, EMA_SLOW)
 
-    # Align arrays til sidste værdier
-    # ema_fast_vals har len = len(closes) - EMA_FAST + 1
-    # Vi kigger blot på de to sidste kryds
     ema_fast_last = ema_fast_vals[-1]
     ema_fast_prev = ema_fast_vals[-2]
 
@@ -259,12 +253,10 @@ def evaluate_trend(closes):
     signal = None
     reason = []
 
-    # Golden cross + RSI over 55 → BUY
     if ema_fast_prev < ema_slow_prev and ema_fast_last > ema_slow_last and rsi_last is not None and rsi_last > 55:
         signal = "BUY"
         reason.append("EMA20 krydser over EMA50 + RSI>55")
 
-    # Death cross + RSI under 45 → SELL
     if ema_fast_prev > ema_slow_prev and ema_fast_last < ema_slow_last and rsi_last is not None and rsi_last < 45:
         signal = "SELL"
         reason.append("EMA20 krydser under EMA50 + RSI<45")
@@ -310,7 +302,6 @@ def evaluate_xrp_swing(closes):
         return None, {}
 
     rsi_val = rsi(closes, RSI_PERIOD)
-    # groft estimat af "forrige" rsi ved at skubbe én candle: vi bruger bare samme funktion på array minus sidste
     rsi_prev = rsi(closes[:-1], RSI_PERIOD)
 
     signal = None
@@ -340,19 +331,19 @@ def main_loop():
         log("FEJL: BINANCE_API_KEY eller BINANCE_API_SECRET mangler i .env")
         return
 
-    log("Starter Tri-Core trading-bot...")
+    log("Starter Tri-Core trading-bot (USDC-version)...")
     log(f"DRY_RUN = {DRY_RUN}")
-    usdt_start = get_balance("USDT")
-    log(f"Start USDT balance: {usdt_start:.2f}")
-    daily_loss_limit = usdt_start * DAILY_MAX_LOSS_PCT
+    usdc_start = get_balance("USDC")
+    log(f"Start USDC balance: {usdc_start:.2f}")
+    daily_loss_limit = usdc_start * DAILY_MAX_LOSS_PCT
 
     while True:
         try:
-            usdt_now = get_balance("USDT")
-            current_loss = usdt_start - usdt_now
+            usdc_now = get_balance("USDC")
+            current_loss = usdc_start - usdc_now
 
             if current_loss > daily_loss_limit and not DRY_RUN:
-                log(f"[STOP] Dagligt tab overskredet ({current_loss:.2f} USDT) – stopper for i dag.")
+                log(f"[STOP] Dagligt tab overskredet ({current_loss:.2f} USDC) – stopper for i dag.")
                 break
 
             for symbol in SYMBOLS:
@@ -391,21 +382,21 @@ def main_loop():
 
                 log(f"Signal for {symbol}: {final_signal} | Årsager: {', '.join(reasons) if reasons else 'Ingen detaljer'}")
 
-                # Risiko: hvor meget USDT bruger vi pr trade?
-                usdt_now = get_balance("USDT")
-                usdt_for_trade = usdt_now * MAX_POSITION_PCT
+                # Risiko: hvor meget USDC bruger vi pr trade?
+                usdc_now = get_balance("USDC")
+                usdc_for_trade = usdc_now * MAX_POSITION_PCT
                 price = get_price(symbol)
 
-                if usdt_for_trade < 10:
-                    log("For lidt USDT til en fornuftig trade. Skipper.")
+                if usdc_for_trade < 5:
+                    log("For lidt USDC til en fornuftig trade. Skipper.")
                     continue
 
-                qty = calc_order_quantity(symbol, price, usdt_for_trade)
+                qty = calc_order_quantity(symbol, price, usdc_for_trade)
 
                 if final_signal == "BUY":
                     place_order(symbol, "BUY", qty)
                 elif final_signal == "SELL":
-                    base_asset = symbol.replace("USDT", "")
+                    base_asset = symbol.replace("USDC", "")
                     balance_base = get_balance(base_asset)
                     if balance_base > 0:
                         place_order(symbol, "SELL", balance_base)
