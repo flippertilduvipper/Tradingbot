@@ -23,8 +23,8 @@ BASE_URL = os.getenv("BASE_URL", "https://api.binance.com")
 # Sæt til False for rigtige handler
 DRY_RUN = False
 
-# Symboler vi handler (USDC-par)
-SYMBOLS = ["BTCUSDC", "ETHUSDC", "XRPUSDC"]
+# Vi holder det simpelt: kun ETHUSDC for lille konto
+SYMBOLS = ["ETHUSDC"]
 
 # Mere aggressivt: 1-minut candles
 INTERVAL = "1m"
@@ -40,10 +40,6 @@ RSI_PERIOD = 14
 
 BB_PERIOD = 20
 BB_STD = 2.0
-
-XRP_SYMBOL = "XRPUSDC"
-XRP_SWING_RSI_LOW = 35
-XRP_SWING_RSI_HIGH = 65
 
 
 def log(msg: str):
@@ -96,7 +92,15 @@ def signed_post(path: str, params: dict):
     query = _sign(params)
     url = f"{BASE_URL}{path}"
     r = requests.post(url, headers=_headers(), data=query, timeout=10)
-    r.raise_for_status()
+    # Hvis noget går galt, vil vi gerne se fejlteksten
+    try:
+        r.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        try:
+            log(f"[ORDRE FEJL HTTP] {r.status_code} {r.text}")
+        except Exception:
+            log(f"[ORDRE FEJL HTTP] {e}")
+        raise
     return r.json()
 
 
@@ -185,23 +189,42 @@ def get_symbol_info(symbol: str):
     return data["symbols"][0]
 
 
+def get_min_notional(symbol: str) -> float:
+    """Hent MIN_NOTIONAL (mindste ordre-værdi i quote-asset, fx USDC)."""
+    info = get_symbol_info(symbol)
+    for f in info["filters"]:
+        if f["filterType"] == "MIN_NOTIONAL":
+            try:
+                return float(f["minNotional"])
+            except Exception:
+                break
+    # fallback hvis noget går galt
+    return 5.0
+
+
+def get_lot_step(symbol: str) -> float:
+    """Hent LOT_SIZE stepSize, så vi overholder min. mængde-step."""
+    info = get_symbol_info(symbol)
+    for f in info["filters"]:
+        if f["filterType"] == "LOT_SIZE":
+            try:
+                return float(f["stepSize"])
+            except Exception:
+                break
+    # fallback
+    return 0.000001
+
+
 # ============================
 # ORDRE-HÅNDTERING
 # ============================
 
 def calc_order_quantity(symbol: str, price: float, usdc_to_use: float) -> float:
-    info = get_symbol_info(symbol)
-    step_size = None
-    for f in info["filters"]:
-        if f["filterType"] == "LOT_SIZE":
-            step_size = float(f["stepSize"])
-            break
-    if step_size is None:
-        return usdc_to_use / price
-
+    step_size = get_lot_step(symbol)
     raw_qty = usdc_to_use / price
     if step_size <= 0:
         return raw_qty
+
     precision = max(0, int(round(-math.log10(step_size))))
     qty = math.floor(raw_qty * (10 ** precision)) / (10 ** precision)
     return qty
@@ -299,32 +322,6 @@ def evaluate_scalper(closes):
     }
 
 
-def evaluate_xrp_swing(closes):
-    """Modul 3: XRP RSI swing."""
-    if len(closes) < RSI_PERIOD + 2:
-        return None, {}
-
-    rsi_val = rsi(closes, RSI_PERIOD)
-    rsi_prev = rsi(closes[:-1], RSI_PERIOD)
-
-    signal = None
-    reason = []
-
-    if rsi_prev is not None and rsi_val is not None:
-        if rsi_prev < XRP_SWING_RSI_LOW and rsi_val > rsi_prev:
-            signal = "BUY"
-            reason.append("RSI kommer op fra oversolgt område for XRP")
-        if rsi_prev > XRP_SWING_RSI_HIGH and rsi_val < rsi_prev:
-            signal = "SELL"
-            reason.append("RSI falder fra høj zone for XRP")
-
-    return signal, {
-        "rsi_last": rsi_val,
-        "rsi_prev": rsi_prev,
-        "reason": reason,
-    }
-
-
 # ============================
 # HOVEDLOOP
 # ============================
@@ -334,27 +331,13 @@ def main_loop():
         log("FEJL: BINANCE_API_KEY eller BINANCE_API_SECRET mangler i .env")
         return
 
-    log("Starter Tri-Core trading-bot (USDC-version, aggressiv 1m)...")
+    log("Starter Tri-Core trading-bot (ETHUSDC, aggressiv 1m)...")
     log(f"DRY_RUN = {DRY_RUN}")
     usdc_now = get_balance("USDC")
     log(f"Start USDC balance: {usdc_now:.2f}")
 
-    # Evt. auto-første trade: køb lidt BTC hvis vi intet ejer
-    btc_bal = get_balance("BTC")
-    eth_bal = get_balance("ETH")
-    xrp_bal = get_balance("XRP")
-
-    if btc_bal == 0 and eth_bal == 0 and xrp_bal == 0 and usdc_now >= 5:
-        log("Ingen BTC/ETH/XRP fundet – køber lille startposition i BTCUSDC.")
-        price_btc = get_price("BTCUSDC")
-        usdc_for_init = usdc_now * 0.3  # 30% af saldo til start
-        qty_btc = calc_order_quantity("BTCUSDC", price_btc, usdc_for_init)
-        place_order("BTCUSDC", "BUY", qty_btc)
-
     while True:
         try:
-            usdc_now = get_balance("USDC")
-
             for symbol in SYMBOLS:
                 log(f"--- Tjekker {symbol} ---")
                 closes, highs, lows = fetch_klines(symbol, INTERVAL, KLINE_LIMIT)
@@ -376,42 +359,36 @@ def main_loop():
                     elif final_signal == scalp_signal:
                         reasons.append("Trend + Scalper i samme retning (stærkt signal)")
 
-                if symbol == XRP_SYMBOL:
-                    xrp_signal, xrp_info = evaluate_xrp_swing(closes)
-                    if xrp_signal:
-                        reasons.extend(xrp_info.get("reason", []))
-                        if final_signal is None:
-                            final_signal = xrp_signal
-                        elif final_signal == xrp_signal:
-                            reasons.append("XRP swing modul bekræfter signal")
-
                 if final_signal is None:
                     log(f"Ingen klar handling for {symbol}.")
                     continue
 
                 log(f"Signal for {symbol}: {final_signal} | Årsager: {', '.join(reasons) if reasons else 'Ingen detaljer'}")
 
-                # Risiko: hvor meget USDC bruger vi pr trade?
-                usdc_now = get_balance("USDC")
-                usdc_for_trade = usdc_now * MAX_POSITION_PCT
                 price = get_price(symbol)
-
-                # Tillad små trades ned til ca. 2 USDC
-                if usdc_for_trade < 2:
-                    log("For lidt USDC til en fornuftig trade. Skipper.")
-                    continue
-
-                qty = calc_order_quantity(symbol, price, usdc_for_trade)
+                min_notional = get_min_notional(symbol)
 
                 if final_signal == "BUY":
+                    usdc_now = get_balance("USDC")
+                    usdc_for_trade = usdc_now * MAX_POSITION_PCT
+
+                    if usdc_for_trade < min_notional:
+                        log(f"For lille USDC-beløb til BUY (under MIN_NOTIONAL {min_notional}). Skipper.")
+                        continue
+
+                    qty = calc_order_quantity(symbol, price, usdc_for_trade)
                     place_order(symbol, "BUY", qty)
+
                 elif final_signal == "SELL":
                     base_asset = symbol.replace("USDC", "")
                     balance_base = get_balance(base_asset)
-                    if balance_base > 0:
-                        place_order(symbol, "SELL", balance_base)
-                    else:
-                        log(f"Ingen {base_asset} at sælge. Skipper SELL.")
+                    total_value = balance_base * price
+
+                    if total_value < min_notional:
+                        log(f"Position ({base_asset}) for lille til SELL (værdi {total_value:.4f} < MIN_NOTIONAL {min_notional}). Skipper.")
+                        continue
+
+                    place_order(symbol, "SELL", balance_base)
 
             log("Venter 60 sekunder før næste scanning...")
             time.sleep(60)
