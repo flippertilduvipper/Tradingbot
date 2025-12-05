@@ -26,12 +26,12 @@ DRY_RUN = False
 # Symboler vi handler (USDC-par)
 SYMBOLS = ["BTCUSDC", "ETHUSDC", "XRPUSDC"]
 
-# Tidsinterval til candlesticks
-INTERVAL = "5m"
+# Mere aggressivt: 1-minut candles
+INTERVAL = "1m"
 KLINE_LIMIT = 200
 
 # Risiko-indstillinger
-MAX_POSITION_PCT = 0.5      # max 50% af konto i en trade (mere aggressiv for lille saldo)
+MAX_POSITION_PCT = 0.5      # max 50% af konto i en trade (aggressiv for lille saldo)
 DAILY_MAX_LOSS_PCT = 0.04   # 4% dagligt max tab
 
 # Indikator-parametre
@@ -237,7 +237,7 @@ def place_order(symbol: str, side: str, quantity: float, order_type: str = "MARK
 # ============================
 
 def evaluate_trend(closes):
-    """Modul 1: EMA 20/50 + RSI-filter."""
+    """Modul 1: EMA 20/50 + RSI-filter (lidt løsere)."""
     if len(closes) < max(EMA_FAST, EMA_SLOW) + 2:
         return None, {}
 
@@ -255,13 +255,15 @@ def evaluate_trend(closes):
     signal = None
     reason = []
 
-    if ema_fast_prev < ema_slow_prev and ema_fast_last > ema_slow_last and rsi_last is not None and rsi_last > 55:
+    # BUY: fast over slow og RSI > 50 (ikke så strengt som før)
+    if ema_fast_last > ema_slow_last and rsi_last is not None and rsi_last > 50:
         signal = "BUY"
-        reason.append("EMA20 krydser over EMA50 + RSI>55")
+        reason.append("EMA20 > EMA50 + RSI>50")
 
-    if ema_fast_prev > ema_slow_prev and ema_fast_last < ema_slow_last and rsi_last is not None and rsi_last < 45:
+    # SELL: fast under slow og RSI < 50
+    if ema_fast_last < ema_slow_last and rsi_last is not None and rsi_last < 50:
         signal = "SELL"
-        reason.append("EMA20 krydser under EMA50 + RSI<45")
+        reason.append("EMA20 < EMA50 + RSI<50")
 
     return signal, {
         "ema_fast_last": ema_fast_last,
@@ -333,11 +335,24 @@ def main_loop():
         log("FEJL: BINANCE_API_KEY eller BINANCE_API_SECRET mangler i .env")
         return
 
-    log("Starter Tri-Core trading-bot (USDC-version)...")
+    log("Starter Tri-Core trading-bot (USDC-version, aggressiv 1m)...")
     log(f"DRY_RUN = {DRY_RUN}")
     usdc_start = get_balance("USDC")
     log(f"Start USDC balance: {usdc_start:.2f}")
     daily_loss_limit = usdc_start * DAILY_MAX_LOSS_PCT
+
+    # Evt. auto-første trade: køb lidt BTC hvis vi intet ejer
+    btc_bal = get_balance("BTC")
+    eth_bal = get_balance("ETH")
+    xrp_bal = get_balance("XRP")
+    usdc_now = get_balance("USDC")
+
+    if btc_bal == 0 and eth_bal == 0 and xrp_bal == 0 and usdc_now >= 5:
+        log("Ingen BTC/ETH/XRP fundet – køber lille startposition i BTCUSDC.")
+        price_btc = get_price("BTCUSDC")
+        usdc_for_init = usdc_now * 0.3  # 30% af saldo til start
+        qty_btc = calc_order_quantity("BTCUSDC", price_btc, usdc_for_init)
+        place_order("BTCUSDC", "BUY", qty_btc)
 
     while True:
         try:
