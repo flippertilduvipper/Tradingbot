@@ -31,7 +31,8 @@ INTERVAL = "1m"
 KLINE_LIMIT = 200
 
 # Risiko-indstillinger
-MAX_POSITION_PCT = 0.5      # max 50% af konto i en trade (aggressiv for lille saldo)
+# 1.0 = brug 100% af USDC pr. BUY (giver mening ved lille saldo ~10–50 USDC)
+MAX_POSITION_PCT = 1.0
 
 # Indikator-parametre
 EMA_FAST = 20
@@ -92,11 +93,11 @@ def signed_post(path: str, params: dict):
     query = _sign(params)
     url = f"{BASE_URL}{path}"
     r = requests.post(url, headers=_headers(), data=query, timeout=10)
-    # Hvis noget går galt, vil vi gerne se fejlteksten
     try:
         r.raise_for_status()
     except requests.exceptions.HTTPError as e:
         try:
+            # Vis Binances rå fejltekst – fx LOT_SIZE, MIN_NOTIONAL osv.
             log(f"[ORDRE FEJL HTTP] {r.status_code} {r.text}")
         except Exception:
             log(f"[ORDRE FEJL HTTP] {e}")
@@ -164,7 +165,7 @@ def bollinger_last(values, period=20, std_factor=2.0):
 
 
 # ============================
-# KONTO & BALANCER
+# KONTO & EXCHANGE INFO
 # ============================
 
 def get_account():
@@ -215,20 +216,25 @@ def get_lot_step(symbol: str) -> float:
     return 0.000001
 
 
+def normalize_quantity(symbol: str, qty: float) -> float:
+    """
+    Runder mængden NED til nærmeste gyldige LOT_SIZE-step,
+    så vi ikke rammer 'Filter failure: LOT_SIZE'.
+    """
+    if qty <= 0:
+        return 0.0
+    step_size = get_lot_step(symbol)
+    if step_size <= 0:
+        return qty
+
+    precision = max(0, int(round(-math.log10(step_size))))
+    normalized = math.floor(qty * (10 ** precision)) / (10 ** precision)
+    return normalized
+
+
 # ============================
 # ORDRE-HÅNDTERING
 # ============================
-
-def calc_order_quantity(symbol: str, price: float, usdc_to_use: float) -> float:
-    step_size = get_lot_step(symbol)
-    raw_qty = usdc_to_use / price
-    if step_size <= 0:
-        return raw_qty
-
-    precision = max(0, int(round(-math.log10(step_size))))
-    qty = math.floor(raw_qty * (10 ** precision)) / (10 ** precision)
-    return qty
-
 
 def place_order(symbol: str, side: str, quantity: float, order_type: str = "MARKET"):
     if quantity <= 0:
@@ -277,7 +283,7 @@ def evaluate_trend(closes):
     signal = None
     reason = []
 
-    # BUY: fast over slow og RSI > 50 (ikke så strengt som før)
+    # BUY: fast over slow og RSI > 50
     if ema_fast_last > ema_slow_last and rsi_last is not None and rsi_last > 50:
         signal = "BUY"
         reason.append("EMA20 > EMA50 + RSI>50")
@@ -373,10 +379,16 @@ def main_loop():
                     usdc_for_trade = usdc_now * MAX_POSITION_PCT
 
                     if usdc_for_trade < min_notional:
-                        log(f"For lille USDC-beløb til BUY (under MIN_NOTIONAL {min_notional}). Skipper.")
+                        log(f"For lille USDC-beløb til BUY (USDC {usdc_for_trade:.4f} < MIN_NOTIONAL {min_notional}). Skipper.")
                         continue
 
-                    qty = calc_order_quantity(symbol, price, usdc_for_trade)
+                    qty = usdc_for_trade / price
+                    qty = normalize_quantity(symbol, qty)
+
+                    if qty <= 0:
+                        log("Normaliseret BUY-mængde <= 0. Skipper.")
+                        continue
+
                     place_order(symbol, "BUY", qty)
 
                 elif final_signal == "SELL":
@@ -388,7 +400,13 @@ def main_loop():
                         log(f"Position ({base_asset}) for lille til SELL (værdi {total_value:.4f} < MIN_NOTIONAL {min_notional}). Skipper.")
                         continue
 
-                    place_order(symbol, "SELL", balance_base)
+                    qty = normalize_quantity(symbol, balance_base)
+
+                    if qty <= 0:
+                        log("Normaliseret SELL-mængde <= 0. Skipper.")
+                        continue
+
+                    place_order(symbol, "SELL", qty)
 
             log("Venter 60 sekunder før næste scanning...")
             time.sleep(60)
