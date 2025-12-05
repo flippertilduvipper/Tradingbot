@@ -19,17 +19,19 @@ API_KEY = os.getenv("BINANCE_API_KEY", "")
 API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 BASE_URL = os.getenv("BASE_URL", "https://api.binance.com")
 
-# Sæt til False når du vil handle rigtigt
-DRY_RUN = True
+# Sæt til True for kun at simulere (ingen rigtige handler)
+# Sæt til False for rigtige handler
+DRY_RUN = False
 
 # Symboler vi handler (USDC-par)
 SYMBOLS = ["BTCUSDC", "ETHUSDC", "XRPUSDC"]
 
+# Tidsinterval til candlesticks
 INTERVAL = "5m"
 KLINE_LIMIT = 200
 
 # Risiko-indstillinger
-MAX_POSITION_PCT = 0.15     # max 15% af konto i en trade
+MAX_POSITION_PCT = 0.5      # max 50% af konto i en trade (mere aggressiv for lille saldo)
 DAILY_MAX_LOSS_PCT = 0.04   # 4% dagligt max tab
 
 # Indikator-parametre
@@ -387,6 +389,7 @@ def main_loop():
                 usdc_for_trade = usdc_now * MAX_POSITION_PCT
                 price = get_price(symbol)
 
+                # Tillad små trades ned til ca. 2 USDC
                 if usdc_for_trade < 2:
                     log("For lidt USDC til en fornuftig trade. Skipper.")
                     continue
