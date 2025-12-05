@@ -32,7 +32,6 @@ KLINE_LIMIT = 200
 
 # Risiko-indstillinger
 MAX_POSITION_PCT = 0.5      # max 50% af konto i en trade (aggressiv for lille saldo)
-DAILY_MAX_LOSS_PCT = 0.04   # 4% dagligt max tab
 
 # Indikator-parametre
 EMA_FAST = 20
@@ -337,15 +336,13 @@ def main_loop():
 
     log("Starter Tri-Core trading-bot (USDC-version, aggressiv 1m)...")
     log(f"DRY_RUN = {DRY_RUN}")
-    usdc_start = get_balance("USDC")
-    log(f"Start USDC balance: {usdc_start:.2f}")
-    daily_loss_limit = usdc_start * DAILY_MAX_LOSS_PCT
+    usdc_now = get_balance("USDC")
+    log(f"Start USDC balance: {usdc_now:.2f}")
 
     # Evt. auto-første trade: køb lidt BTC hvis vi intet ejer
     btc_bal = get_balance("BTC")
     eth_bal = get_balance("ETH")
     xrp_bal = get_balance("XRP")
-    usdc_now = get_balance("USDC")
 
     if btc_bal == 0 and eth_bal == 0 and xrp_bal == 0 and usdc_now >= 5:
         log("Ingen BTC/ETH/XRP fundet – køber lille startposition i BTCUSDC.")
@@ -357,11 +354,6 @@ def main_loop():
     while True:
         try:
             usdc_now = get_balance("USDC")
-            current_loss = usdc_start - usdc_now
-
-            if current_loss > daily_loss_limit and not DRY_RUN:
-                log(f"[STOP] Dagligt tab overskredet ({current_loss:.2f} USDC) – stopper for i dag.")
-                break
 
             for symbol in SYMBOLS:
                 log(f"--- Tjekker {symbol} ---")
