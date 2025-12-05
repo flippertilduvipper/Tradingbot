@@ -387,7 +387,7 @@ def main_loop():
                 usdc_for_trade = usdc_now * MAX_POSITION_PCT
                 price = get_price(symbol)
 
-                if usdc_for_trade < 5:
+                if usdc_for_trade < 2:
                     log("For lidt USDC til en fornuftig trade. Skipper.")
                     continue
 
